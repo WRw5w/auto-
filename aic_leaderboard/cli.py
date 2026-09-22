@@ -17,11 +17,27 @@ def main(argv=None):
     e = sub.add_parser("enqueue"); e.add_argument("candidate"); e.add_argument("--stage", required=True); e.add_argument("--team", required=True)
     sub.add_parser("status")
     s = sub.add_parser("submit"); s.add_argument("--id", required=True); s.add_argument("--confirm-real-submit", action="store_true")
+    c = sub.add_parser("capture"); c.add_argument("--id", required=True)
     args = ap.parse_args(argv)
     q = Queue(args.root)
     if args.cmd == "validate": out = validate_candidate(args.candidate)
     elif args.cmd == "enqueue": out = q.enqueue(args.candidate, stage=args.stage, team=args.team)
     elif args.cmd == "status": out = q.status()
+    elif args.cmd == "capture":
+        state = q.read(); item = next((x for x in state["queue"] if x["id"] == args.id), None)
+        if item is None: raise SystemExit("unknown candidate id")
+        if item.get("status") not in {"accepted", "awaiting_score", "outcome_unknown"}:
+            raise SystemExit("candidate is not ready for score capture")
+        env = {**os.environ, "AIC_LEADERBOARD_ROOT": str(q.root),
+               "AIC_LEADERBOARD_TEAM_ID": item.get("team", "")}
+        proc = subprocess.run(["node", str(q.root / "tools" / "leaderboard_cdp.mjs"), "leaderboard"],
+                              env=env, capture_output=True, text=True)
+        evidence = q.root / "leaderboard_evidence" / f"{item['id']}.json"
+        evidence.parent.mkdir(parents=True, exist_ok=True)
+        evidence.write_text(json.dumps({"candidateId": item["id"], "candidateSha256": item["sha256"],
+                                        "returncode": proc.returncode, "stdout": proc.stdout,
+                                        "stderr": proc.stderr}, ensure_ascii=False, indent=2), encoding="utf-8")
+        out = {"captured": proc.returncode == 0, "evidence": str(evidence), "candidate": item["id"]}
     else:
         state = q.read(); item = next((x for x in state["queue"] if x["id"] == args.id), None)
         if item is None: raise SystemExit("unknown candidate id")

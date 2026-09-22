@@ -3,4 +3,5 @@ __pycache__/
 .pytest_cache/
 aic_leaderboard_state.json
 submissions/
+leaderboard_evidence/
 *.log

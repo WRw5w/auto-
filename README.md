@@ -17,6 +17,7 @@ $env:AIC_LEADERBOARD_LEADERBOARD_URL = 'https://your-aic-leaderboard-page'
 python -m aic_leaderboard.cli validate .\candidate.zip
 python -m aic_leaderboard.cli enqueue .\candidate.zip --stage semi --team YOUR_TEAM
 python -m aic_leaderboard.cli status
+python -m aic_leaderboard.cli capture --id QUEUE_ID
 ```
 
 The CLI is dry-run unless `submit ... --confirm-real-submit` is supplied. The
@@ -26,3 +27,7 @@ boolean `confirm_real_submit=true` and uses the local CDP session.
 `tools/leaderboard_cdp.mjs` is adapted from the state-machine design in
 `WRw5w/aic_new`: CDP preflight, one candidate per process, exact file binding,
 login detection, upload readiness checks, and explicit unknown-outcome handling.
+
+Score capture stores a raw browser snapshot under `leaderboard_evidence/`, bound
+to the candidate id and SHA-256. It does not mark a score as official without
+operator verification that the visible submission time belongs to that candidate.
