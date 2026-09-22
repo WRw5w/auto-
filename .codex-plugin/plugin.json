@@ -1,0 +1,8 @@
+{
+  "name": "aic-leaderboard",
+  "displayName": "AIC Leaderboard Control",
+  "description": "Safe, portable queue and browser control for AIC competition submissions.",
+  "version": "0.1.0",
+  "author": {"name": "local"},
+  "license": "MIT"
+}
