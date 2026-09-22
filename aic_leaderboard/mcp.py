@@ -11,7 +11,10 @@ ROOT = os.environ.get("AIC_LEADERBOARD_ROOT", ".")
 
 def reply(i, result=None, error=None):
     msg = {"jsonrpc":"2.0", "id":i}
-    msg["error"] = {"code": -32602, "message": error} if error else {"result": result}
+    if error:
+        msg["error"] = {"code": -32602, "message": error}
+    else:
+        msg["result"] = result
     print(json.dumps(msg, ensure_ascii=False), flush=True)
 
 def main():
