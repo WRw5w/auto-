@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+aic_leaderboard_state.json
+submissions/
+*.log
