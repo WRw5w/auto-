@@ -13,8 +13,9 @@ submissions. An upload acknowledgement is not a score; only a score tied to the 
 candidate hash and accepted submission window may be recorded.
 
 Do not copy browser profiles, cookies, local storage, API tokens, or passwords into the
-repository. Start a dedicated Chrome profile with CDP port 9222 and let the user log in.
-If CDP is unavailable, stop without changing queue state.
+repository. The default browser uses Playwright's debugging pipe and a separate
+persistent Chrome profile. The first real operation may require a visible manual login.
+If the pipe probe fails, stop before changing queue state.
 
 Commands:
 
@@ -22,5 +23,6 @@ Commands:
 python -m aic_leaderboard.cli --root . validate candidate.zip
 python -m aic_leaderboard.cli --root . enqueue candidate.zip --stage semi --team TEAM
 python -m aic_leaderboard.cli --root . status
+node tools/leaderboard_pipe.mjs probe
 python -m aic_leaderboard.cli --root . submit --id QUEUE_ID --confirm-real-submit
 ```

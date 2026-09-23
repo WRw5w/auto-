@@ -3,10 +3,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 from .core import Queue, validate_candidate
+
+
+def submission_status(returncode: int, click_attempted: bool) -> str:
+    if returncode == 0:
+        return "accepted"
+    return "outcome_unknown" if click_attempted else "no_click"
 
 
 def main(argv=None):
@@ -30,7 +37,8 @@ def main(argv=None):
             raise SystemExit("candidate is not ready for score capture")
         env = {**os.environ, "AIC_LEADERBOARD_ROOT": str(q.root),
                "AIC_LEADERBOARD_TEAM_ID": item.get("team", "")}
-        proc = subprocess.run(["node", str(q.root / "tools" / "leaderboard_cdp.mjs"), "leaderboard"],
+        browser = "leaderboard_pipe.mjs" if os.environ.get("AIC_LEADERBOARD_BROWSER", "pipe") == "pipe" else "leaderboard_cdp.mjs"
+        proc = subprocess.run(["node", str(q.root / "tools" / browser), "leaderboard"],
                               env=env, capture_output=True, text=True)
         evidence = q.root / "leaderboard_evidence" / f"{item['id']}.json"
         evidence.parent.mkdir(parents=True, exist_ok=True)
@@ -44,18 +52,38 @@ def main(argv=None):
         if not args.confirm_real_submit:
             out = {"dry_run": True, "would_submit": item, "message": "pass --confirm-real-submit to click the browser"}
         else:
+            if item.get("status") not in {"queued", "no_click"}:
+                raise SystemExit(f"candidate status {item.get('status')} cannot be submitted again")
             if q.status()["active"] and q.status()["active"]["id"] != item["id"]:
                 raise SystemExit("another submission is active; refusing duplicate submit")
-            item["status"] = "submitting"; q.write(state)
+            if not os.environ.get("AIC_LEADERBOARD_SUBMIT_URL", "").startswith("https://reg.aicomp.cn/"):
+                raise SystemExit("set AIC_LEADERBOARD_SUBMIT_URL to the full AIC submit page")
+            if shutil.which("node") is None:
+                raise SystemExit("Node.js is required for browser control")
+            if validate_candidate(item["path"])["sha256"] != item["sha256"]:
+                raise SystemExit("candidate bytes changed since enqueue")
+            browser = "leaderboard_pipe.mjs" if os.environ.get("AIC_LEADERBOARD_BROWSER", "pipe") == "pipe" else "leaderboard_cdp.mjs"
             env = {**os.environ, "AIC_LEADERBOARD_ROOT": str(q.root),
                    "AIC_LEADERBOARD_CONFIRM": "true",
                    "AIC_LEADERBOARD_FENCE_MODE": "local",
                    "AIC_LEADERBOARD_EXPECTED_SHA256": item["sha256"],
+                   "AIC_LEADERBOARD_QUEUE_ID": item["id"],
                    "AIC_LEADERBOARD_SUBMIT_URL": os.environ.get("AIC_LEADERBOARD_SUBMIT_URL", ""),
                    "AIC_LEADERBOARD_LEADERBOARD_URL": os.environ.get("AIC_LEADERBOARD_LEADERBOARD_URL", "")}
-            rc = subprocess.run(["node", str(q.root / "tools" / "leaderboard_cdp.mjs"), "submit-one", item["path"]], env=env).returncode
-            item["status"] = "accepted" if rc == 0 else "outcome_unknown"
-            q.write(state); out = {"returncode": rc, "item": item}
+            if browser == "leaderboard_pipe.mjs":
+                probe = subprocess.run(["node", str(q.root / "tools" / browser), "probe"],
+                                       env=env, capture_output=True, text=True, timeout=30)
+                if probe.returncode:
+                    raise SystemExit("Chrome debugging pipe is unavailable; queue state was not changed")
+            item["status"] = "submitting"; q.write(state)
+            proc = subprocess.run(["node", str(q.root / "tools" / browser), "submit-one", item["path"]],
+                                  env=env, capture_output=True, text=True, errors="replace")
+            attempted = (q.root / "submissions" / f"{item['id']}.attempt.json").exists() or \
+                "SUBMIT_CLICK_ATTEMPTED_AT=" in proc.stdout or "SUBMIT_CLICKED_AT=" in proc.stdout
+            item["status"] = submission_status(proc.returncode, attempted)
+            q.write(state)
+            out = {"returncode": proc.returncode, "item": item, "click_attempted": attempted,
+                   "browser_stdout": proc.stdout[-4000:], "browser_stderr": proc.stderr[-4000:]}
     print(json.dumps(out, ensure_ascii=False, indent=2))
 
 
