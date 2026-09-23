@@ -36,7 +36,6 @@ SPENT = {
     "accepted",
     "unconfirmed",
     "awaiting_score",
-    "score_captured",
     "outcome_unknown",
 }
 
@@ -167,7 +166,7 @@ def guards(root: str | Path, *, sha256: str | None = None, stage: str | None = N
 
 def summary(root: str | Path, stage: str | None = None) -> dict[str, Any]:
     records = read(root)
-    rows = [r for r in records if not r.get("dry_run")]
+    rows = [r for r in records if not r.get("dry_run") and r.get("status") in SPENT]
     return {
         "ledger": str(ledger_path(root)),
         "records": len(records),

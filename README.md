@@ -29,7 +29,8 @@ node tools/pipe_smoke.mjs
 python -m aic_leaderboard.cli validate .\candidate.zip
 python -m aic_leaderboard.cli enqueue .\candidate.zip --stage semi --team YOUR_TEAM
 python -m aic_leaderboard.cli status
-python -m aic_leaderboard.cli capture --id QUEUE_ID
+python -m aic_leaderboard.auto capture --team YOUR_TEAM
+node tools/leaderboard_pipe.mjs result-records
 ```
 
 The `auto` CLI requires `--dry-run` for a rehearsal and
@@ -43,6 +44,13 @@ MCP process environment; logging in happens in the dedicated visible Chrome.
 `WRw5w/aic_new`: CDP preflight, one candidate per process, exact file binding,
 login detection, upload readiness checks, and explicit unknown-outcome handling.
 
-Score capture stores a raw browser snapshot under `leaderboard_evidence/`, bound
-to the candidate id and SHA-256. It does not mark a score as official without
-operator verification that the visible submission time belongs to that candidate.
+For the standard browser backend, `result-records` reads the signed-in account's
+`打榜状态查询` page. This includes zero-score and infeasible submissions that do not
+appear on the public leaderboard. The route defaults to the AIC account results
+page and can be overridden with `AIC_LEADERBOARD_RECORDS_URL` for another AIC
+track. The auto CLI attributes a `DONE` score only when the result's timestamp is
+after the submit click and downloading its saved attachment yields the queued
+ZIP's SHA-256. If the download or hash check is unavailable, it reports the
+visible result but leaves score attribution pending for manual verification.
+The legacy CDP backend still captures public leaderboard snapshots under
+`leaderboard_evidence/`.

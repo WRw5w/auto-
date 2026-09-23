@@ -24,5 +24,6 @@ python -m aic_leaderboard.cli --root . validate candidate.zip
 python -m aic_leaderboard.cli --root . enqueue candidate.zip --stage semi --team TEAM
 python -m aic_leaderboard.cli --root . status
 node tools/leaderboard_pipe.mjs probe
+node tools/leaderboard_pipe.mjs result-records
 python -m aic_leaderboard.cli --root . submit --id QUEUE_ID --confirm-real-submit
 ```

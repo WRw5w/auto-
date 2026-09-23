@@ -1,7 +1,7 @@
 """One-command automatic AIC leaderboard submission (复赛 / 半决赛).
 
     python -m aic_leaderboard.auto submit <result.zip> --dry-run
-    python -m aic_leaderboard.auto submit <result.zip> --confirm-real-submit
+    python -m aic_leaderboard.auto submit <result.zip> --team YOUR_TEAM --confirm-real-submit
     python -m aic_leaderboard.auto submit --pick-best runs/semi_merged_v2 --dry-run
     python -m aic_leaderboard.auto status
 
@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from . import ledger
-from .core import Queue, validate_candidate
+from .core import Queue, sha256 as file_sha256, validate_candidate
 
 ROOT = Path(
     os.environ.get("AIC_LEADERBOARD_ROOT") or Path(__file__).resolve().parent.parent
@@ -329,6 +329,48 @@ def step_capture(*, team: str, previous: str | None, timeout: float) -> dict[str
     return None
 
 
+def result_row(payload: dict[str, Any], *, team: str, stage: str,
+               expected_sha256: str, since: str | None) -> dict[str, Any] | None:
+    """Attribute an account result only after the server attachment hash matches."""
+    record = payload.get("record") or {}
+    if (not payload.get("ok") or record.get("team") != team or record.get("stage") != stage
+            or record.get("status") != "DONE" or record.get("attachmentMatches") is not True
+            or record.get("attachmentSha256") != expected_sha256):
+        return None
+    evaluated = record.get("evaluated")
+    score = record.get("score")
+    if not evaluated or not isinstance(score, (int, float)) or isinstance(score, bool):
+        return None
+    if since:
+        try:
+            actual = datetime.fromisoformat(evaluated.replace("Z", "+00:00"))
+            threshold = datetime.fromisoformat(since.replace("Z", "+00:00"))
+            if actual.tzinfo is None:
+                actual = actual.replace(tzinfo=ledger.CN)
+            if threshold.tzinfo is None:
+                threshold = threshold.replace(tzinfo=ledger.CN)
+            if actual <= threshold:
+                return None
+        except ValueError:
+            return None
+    return {"team": team, "submitted": None, "score": float(score),
+            "evaluated": evaluated, "name": record.get("title") or "",
+            "status": record["status"], "failure_reason": record.get("failureReason") or "",
+            "attachment_sha256": record["attachmentSha256"], "raw": record}
+
+
+def step_capture_result(*, team: str, stage: str, expected_sha256: str,
+                        since: str | None) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    rc, out = run_node(["result-records"],
+                       env=child_env(AIC_LEADERBOARD_TEAM_ID=team,
+                                     AIC_LEADERBOARD_STAGE=stage,
+                                     AIC_LEADERBOARD_EXPECTED_SHA256=expected_sha256),
+                       inherit=False, timeout=120)
+    payload = extract_last_json(out) or {"ok": False, "reason": "no_result_payload", "returncode": rc}
+    return result_row(payload, team=team, stage=stage,
+                      expected_sha256=expected_sha256, since=since), payload
+
+
 def resolve_candidate(args: argparse.Namespace) -> Path:
     if args.candidate:
         return Path(args.candidate).expanduser().resolve()
@@ -344,7 +386,7 @@ def resolve_candidate(args: argparse.Namespace) -> Path:
 
 
 def rank_candidates(paths: list[str]) -> list[dict[str, Any]]:
-    """Score each candidate package by its own local official-scored report."""
+    """Rank local estimates, excluding packages officially marked infeasible."""
     entries: list[dict[str, Any]] = []
     for raw in paths:
         p = Path(raw).expanduser().resolve()
@@ -370,12 +412,25 @@ def rank_candidates(paths: list[str]) -> list[dict[str, Any]]:
                     if score is not None:
                         break
             for z in zips:
-                entries.append({"zip": z, "score": score, "dir": str(p), "mtime": z.stat().st_mtime})
+                if not officially_infeasible(z):
+                    entries.append({"zip": z, "score": score, "dir": str(p), "mtime": z.stat().st_mtime})
         elif p.suffix.lower() in {".zip", ".rar"}:
-            entries.append({"zip": p, "score": None, "dir": str(p.parent), "mtime": p.stat().st_mtime})
+            if not officially_infeasible(p):
+                entries.append({"zip": p, "score": None, "dir": str(p.parent), "mtime": p.stat().st_mtime})
     entries.sort(key=lambda e: (e["score"] if e["score"] is not None else float("-inf"), e["mtime"]),
                  reverse=True)
     return entries
+
+
+def officially_infeasible(candidate: Path) -> bool:
+    feedback = candidate.parent / "official_feedback.json"
+    if not feedback.is_file():
+        return False
+    try:
+        record = json.loads(feedback.read_text(encoding="utf-8"))
+        return (record.get("infeasible") is True and record.get("sha256") == file_sha256(candidate))
+    except (OSError, json.JSONDecodeError):
+        return False
 
 
 def local_score_beside(zip_path: Path) -> float | None:
@@ -399,6 +454,9 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_submit(args: argparse.Namespace) -> int:
+    if not args.team:
+        say("guard", "set --team or AIC_LEADERBOARD_TEAM_ID before submitting")
+        return EXIT_GUARD_REFUSED
     report: dict[str, Any] = {"startedAt": ledger.now_cn().isoformat(timespec="seconds"),
                               "stage": args.stage, "team": args.team, "dryRun": args.dry_run}
     candidate = resolve_candidate(args)
@@ -421,6 +479,11 @@ def cmd_submit(args: argparse.Namespace) -> int:
             write_report(report)
             return EXIT_GUARD_REFUSED
         say("guard", "--force given; overriding the guards")
+    if args.retry_unverified and not args.force:
+        say("guard", "--retry-unverified requires --force and an externally checked mismatch")
+        report["outcome"] = "guard_refused"
+        write_report(report)
+        return EXIT_GUARD_REFUSED
 
     # ---- 1/2. browser + login -------------------------------------------
     if args.no_browser:
@@ -465,6 +528,8 @@ def cmd_submit(args: argparse.Namespace) -> int:
            "submit", "--id", item["id"]]
     if not args.dry_run:
         cli.append("--confirm-real-submit")
+        if args.retry_unverified:
+            cli.append("--retry-unverified")
     say("submit", "clicking the submit button" if not args.dry_run else "DRY RUN: not clicking")
     proc = subprocess.run(cli, cwd=ROOT, env=child_env(AIC_LEADERBOARD_TEAM_ID=args.team),
                           capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -493,9 +558,18 @@ def cmd_submit(args: argparse.Namespace) -> int:
 
     # ---- 6. capture ------------------------------------------------------
     row = None
+    clicked_match = re.search(r"SUBMIT_CLICKED_AT=(\S+)", result.get("browser_stdout") or "")
+    clicked_at = clicked_match.group(1) if clicked_match else None
     if status == "accepted" and not args.no_browser and args.score_timeout > 0:
-        say("capture", f"waiting for a new leaderboard row (prev={previous})")
-        row = step_capture(team=args.team, previous=previous, timeout=args.score_timeout)
+        if BROWSER_BACKEND == "pipe":
+            say("capture", "reading the account result page and checking the saved ZIP hash")
+            row, snapshot = step_capture_result(team=args.team, stage=args.stage,
+                                                expected_sha256=meta["sha256"],
+                                                since=clicked_at or previous)
+            report["resultRecord"] = snapshot
+        else:
+            say("capture", f"waiting for a new leaderboard row (prev={previous})")
+            row = step_capture(team=args.team, previous=previous, timeout=args.score_timeout)
         report["leaderboardRow"] = row
     report["localScore"] = local_score_beside(candidate)
 
@@ -504,11 +578,13 @@ def cmd_submit(args: argparse.Namespace) -> int:
         "stage": args.stage, "team": args.team, "path": str(candidate),
         "sha256": meta["sha256"], "bytes": meta["bytes"], "candidateId": item["id"],
         "dry_run": args.dry_run, "status": status,
+        "clicked_at": clicked_at,
         "submit_rc": report.get("submit", {}).get("returncode"),
         "submitted_at": (row or {}).get("submitted"),
         "score": (row or {}).get("score"),
         "rank": None, "evaluated_at": (row or {}).get("evaluated"),
         "local_score": report["localScore"], "raw_row": (row or {}).get("raw"),
+        "failure_reason": (row or {}).get("failure_reason"),
     })
     report["ledger"] = entry
     say("ledger", f"recorded status={status} score={(row or {}).get('score')}")
@@ -533,14 +609,41 @@ def cmd_submit(args: argparse.Namespace) -> int:
 
 
 def cmd_capture(args: argparse.Namespace) -> int:
-    previous = args.since or ledger.newest_submission_time(ROOT)
-    say("capture", f"waiting for a row newer than {previous}")
-    row = step_capture(team=args.team, previous=previous, timeout=args.score_timeout)
+    if not args.team:
+        print(json.dumps({"error": "set --team or AIC_LEADERBOARD_TEAM_ID"}, ensure_ascii=False))
+        return EXIT_GUARD_REFUSED
+    history = ledger.read(ROOT)
+    pending = next((r for r in reversed(history) if r.get("stage") == args.stage and
+                    r.get("team") == args.team and r.get("status") == "accepted" and
+                    r.get("sha256")), None)
+    if BROWSER_BACKEND == "pipe":
+        if pending is None:
+            print(json.dumps({"error": "no accepted candidate to attribute"}, ensure_ascii=False))
+            return EXIT_SCORE_TIMEOUT
+        scored = next((r for r in reversed(history) if r.get("sha256") == pending["sha256"]
+                       and r.get("score") is not None and r.get("evaluated_at")), None)
+        if scored:
+            print(json.dumps({"already_captured": scored}, ensure_ascii=False, indent=2))
+            return EXIT_OK
+        previous = args.since or pending.get("clicked_at") or pending.get("at")
+        say("capture", f"reading account results after {previous}")
+        row, snapshot = step_capture_result(team=args.team, stage=args.stage,
+                                            expected_sha256=pending["sha256"], since=previous)
+        if row is None:
+            print(json.dumps({"error": "no hash-matched DONE result yet", "resultRecord": snapshot},
+                             ensure_ascii=False, indent=2))
+            return EXIT_SCORE_TIMEOUT
+    else:
+        previous = args.since or ledger.newest_submission_time(ROOT)
+        say("capture", f"waiting for a row newer than {previous}")
+        row = step_capture(team=args.team, previous=previous, timeout=args.score_timeout)
     if row:
         best_before = ledger.best(ROOT, args.stage)
         ledger.append(ROOT, {"stage": args.stage, "team": args.team, "status": "score_captured",
                              "submitted_at": row.get("submitted"), "score": row.get("score"),
                              "evaluated_at": row.get("evaluated"), "raw_row": row.get("raw"),
+                             "sha256": pending.get("sha256") if pending else None,
+                             "failure_reason": row.get("failure_reason"),
                              "note": "captured by `auto capture`"})
         print(json.dumps({"row": row, "best_before": (best_before or {}).get("score"),
                           "delta": (row["score"] - best_before["score"]) if best_before and
@@ -568,7 +671,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     def common(p: argparse.ArgumentParser) -> None:
         p.add_argument("--stage", default=STAGE_DEFAULT)
-        p.add_argument("--team", default=TEAM_DEFAULT or "AIC-2026-93096493")
+        p.add_argument("--team", default=TEAM_DEFAULT)
 
     s = sub.add_parser("submit", help="run the whole guarded pipeline")
     s.add_argument("candidate", nargs="?")
@@ -577,6 +680,8 @@ def build_parser() -> argparse.ArgumentParser:
     common(s)
     s.add_argument("--dry-run", action="store_true", help="everything except the click")
     s.add_argument("--force", action="store_true", help="override the ledger guards")
+    s.add_argument("--retry-unverified", action="store_true",
+                   help="retry a queue item marked outcome_unknown after verifying the first file was not saved")
     s.add_argument("--no-browser", action="store_true", help="skip CDP, login and score capture")
     s.add_argument("--no-launch-chrome", action="store_true")
     s.add_argument("--cdp-url", help=f"DevTools endpoint (default {CDP_URL})")
@@ -588,7 +693,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="explicitly acknowledge that this clicks the real submit button")
     s.set_defaults(func=cmd_submit)
 
-    c = sub.add_parser("capture", help="poll the leaderboard for a new scored row")
+    c = sub.add_parser("capture", help="read account result and verify the submitted ZIP hash")
     common(c)
     c.add_argument("--since", help="only accept rows submitted after this stamp")
     c.add_argument("--score-timeout", type=float, default=1800.0)

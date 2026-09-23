@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
 from .core import Queue, validate_candidate
@@ -24,6 +25,8 @@ def main(argv=None):
     e = sub.add_parser("enqueue"); e.add_argument("candidate"); e.add_argument("--stage", required=True); e.add_argument("--team", required=True)
     sub.add_parser("status")
     s = sub.add_parser("submit"); s.add_argument("--id", required=True); s.add_argument("--confirm-real-submit", action="store_true")
+    s.add_argument("--retry-unverified", action="store_true",
+                   help="retry an outcome_unknown queue item after external verification")
     c = sub.add_parser("capture"); c.add_argument("--id", required=True)
     args = ap.parse_args(argv)
     q = Queue(args.root)
@@ -52,7 +55,8 @@ def main(argv=None):
         if not args.confirm_real_submit:
             out = {"dry_run": True, "would_submit": item, "message": "pass --confirm-real-submit to click the browser"}
         else:
-            if item.get("status") not in {"queued", "no_click"}:
+            retry = args.retry_unverified and item.get("status") == "outcome_unknown"
+            if item.get("status") not in {"queued", "no_click"} and not retry:
                 raise SystemExit(f"candidate status {item.get('status')} cannot be submitted again")
             if q.status()["active"] and q.status()["active"]["id"] != item["id"]:
                 raise SystemExit("another submission is active; refusing duplicate submit")
@@ -63,9 +67,11 @@ def main(argv=None):
             if validate_candidate(item["path"])["sha256"] != item["sha256"]:
                 raise SystemExit("candidate bytes changed since enqueue")
             browser = "leaderboard_pipe.mjs" if os.environ.get("AIC_LEADERBOARD_BROWSER", "pipe") == "pipe" else "leaderboard_cdp.mjs"
+            attempt_id = uuid.uuid4().hex
             env = {**os.environ, "AIC_LEADERBOARD_ROOT": str(q.root),
                    "AIC_LEADERBOARD_TEAM_ID": item["team"],
                    "AIC_LEADERBOARD_CONFIRM": "true",
+                   "AIC_LEADERBOARD_ATTEMPT_ID": attempt_id,
                    "AIC_LEADERBOARD_FENCE_MODE": "local",
                    "AIC_LEADERBOARD_EXPECTED_SHA256": item["sha256"],
                    "AIC_LEADERBOARD_QUEUE_ID": item["id"],
@@ -79,7 +85,7 @@ def main(argv=None):
             item["status"] = "submitting"; q.write(state)
             proc = subprocess.run(["node", str(q.root / "tools" / browser), "submit-one", item["path"]],
                                   env=env, capture_output=True, text=True, errors="replace")
-            attempted = (q.root / "submissions" / f"{item['id']}.attempt.json").exists() or \
+            attempted = (q.root / "submissions" / f"{item['id']}.{attempt_id}.attempt.json").exists() or \
                 "SUBMIT_CLICK_ATTEMPTED_AT=" in proc.stdout or "SUBMIT_CLICKED_AT=" in proc.stdout
             item["status"] = submission_status(proc.returncode, attempted)
             q.write(state)

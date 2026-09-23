@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from aic_leaderboard import auto, ledger  # noqa: E402
 from aic_leaderboard.cli import submission_status  # noqa: E402
+from aic_leaderboard.core import sha256  # noqa: E402
 
 REAL_ROW = (
     "19 | AIC-2026-93096493 | 鱼不吃猫 | 2026-09-16 10:38:45 | 98.6500 | 2026-09-16 10:38:54\n"
@@ -64,6 +65,14 @@ class LedgerTests(unittest.TestCase):
         ledger.append(self.root, {"stage": "semi", "status": "outcome_unknown"})
         self.assertEqual(len(ledger.spent_today(self.root, stage="semi")), 1)
 
+    def test_score_capture_and_correction_do_not_spend_another_slot(self) -> None:
+        ledger.append(self.root, {"stage": "semi", "status": "accepted", "sha256": "aa"})
+        ledger.append(self.root, {"stage": "semi", "status": "score_captured", "score": 0})
+        ledger.append(self.root, {"stage": "semi", "status": "platform_result", "score": 0})
+        ledger.append(self.root, {"stage": "semi", "status": "verification_mismatch"})
+        self.assertEqual(len(ledger.spent_today(self.root, stage="semi")), 1)
+        self.assertEqual(ledger.summary(self.root, stage="semi")["real_submissions"], 1)
+
     def test_duplicate_bytes_are_blocked(self) -> None:
         ledger.append(self.root, {"stage": "semi", "status": "accepted", "sha256": "deadbeef"})
         state = ledger.guards(self.root, sha256="deadbeef", stage="semi")
@@ -97,6 +106,24 @@ class LedgerTests(unittest.TestCase):
 
 
 class RowParsingTests(unittest.TestCase):
+    def test_account_result_accepts_zero_only_with_matching_attachment_and_new_time(self) -> None:
+        sha = "a" * 64
+        payload = {"ok": True, "record": {"team": "AIC-2026-93096493", "stage": "semi",
+                   "score": 0, "status": "DONE", "evaluated": "2026-09-23 11:12:56",
+                   "attachmentSha256": sha, "attachmentMatches": True,
+                   "failureReason": "跨轮接续不连续(7030条)"}}
+        row = auto.result_row(payload, team="AIC-2026-93096493", stage="semi",
+                              expected_sha256=sha, since="2026-09-23T11:12:16+08:00")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["score"], 0.0)
+        self.assertIn("7030", row["failure_reason"])
+        payload["record"]["attachmentMatches"] = False
+        self.assertIsNone(auto.result_row(payload, team="AIC-2026-93096493", stage="semi",
+                                           expected_sha256=sha, since=None))
+        payload["record"]["attachmentMatches"] = True
+        self.assertIsNone(auto.result_row(payload, team="AIC-2026-93096493", stage="semi",
+                                           expected_sha256=sha, since="2026-09-23T11:13:00+08:00"))
+
     def test_parses_the_real_leaderboard_row(self) -> None:
         rows = auto.parse_rows(REAL_ROW, "AIC-2026-93096493")
         self.assertEqual(len(rows), 2)
@@ -163,6 +190,15 @@ class CandidatePickingTests(unittest.TestCase):
             {"score_capped": 94.71154834617565}}), encoding="utf-8")
         self.assertAlmostEqual(auto.local_score_beside(z), 94.71154834617565)
 
+    def test_pick_best_skips_a_package_with_official_infeasible_feedback(self) -> None:
+        bad, good = self._pack("bad", 94.71), self._pack("good", 93.5)
+        (bad / "official_feedback.json").write_text(
+            json.dumps({"official_score": 0, "infeasible": True,
+                        "sha256": sha256(bad / "复赛结果_鱼不吃猫.zip")}), encoding="utf-8")
+        ranked = auto.rank_candidates([str(bad), str(good)])
+        self.assertEqual([entry["dir"] for entry in ranked], [str(good)])
+        self.assertEqual(auto.rank_candidates([str(bad / "复赛结果_鱼不吃猫.zip")]), [])
+
 
 class ConfirmationGateTests(unittest.TestCase):
     def test_a_real_submit_is_refused_without_the_explicit_flag(self) -> None:
@@ -172,7 +208,8 @@ class ConfirmationGateTests(unittest.TestCase):
     def test_dry_run_is_allowed_through_the_gate(self) -> None:
         # It must get past the gate and fail later on the missing file, not on
         # the confirmation check.
-        code = auto.main(["submit", "does-not-matter.zip", "--dry-run", "--no-browser"])
+        code = auto.main(["submit", "does-not-matter.zip", "--team", "TEST",
+                          "--dry-run", "--no-browser"])
         self.assertNotEqual(code, auto.EXIT_GUARD_REFUSED)
 
     def test_failure_before_click_does_not_spend_a_submission(self) -> None:
