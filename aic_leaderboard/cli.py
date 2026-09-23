@@ -64,6 +64,7 @@ def main(argv=None):
                 raise SystemExit("candidate bytes changed since enqueue")
             browser = "leaderboard_pipe.mjs" if os.environ.get("AIC_LEADERBOARD_BROWSER", "pipe") == "pipe" else "leaderboard_cdp.mjs"
             env = {**os.environ, "AIC_LEADERBOARD_ROOT": str(q.root),
+                   "AIC_LEADERBOARD_TEAM_ID": item["team"],
                    "AIC_LEADERBOARD_CONFIRM": "true",
                    "AIC_LEADERBOARD_FENCE_MODE": "local",
                    "AIC_LEADERBOARD_EXPECTED_SHA256": item["sha256"],

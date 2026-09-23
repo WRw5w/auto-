@@ -76,11 +76,12 @@ async function run() {
   if (command === "submit-one") {
     const expected = String(process.env.AIC_LEADERBOARD_EXPECTED_SHA256 || "").toLowerCase();
     const queueId = String(process.env.AIC_LEADERBOARD_QUEUE_ID || "");
-    if (process.env.AIC_LEADERBOARD_CONFIRM !== "true" || !expected || !queueId) return 77;
+    const team = String(process.env.AIC_LEADERBOARD_TEAM_ID || "");
+    if (process.env.AIC_LEADERBOARD_CONFIRM !== "true" || !expected || !queueId || !team) return 77;
     if (!fs.existsSync(candidate) || digest(candidate) !== expected) return 77;
     const queue = JSON.parse(fs.readFileSync(path.join(root, "aic_leaderboard_state.json"), "utf8"));
     const matches = queue.queue.filter(x => x.id === queueId && x.status === "submitting" &&
-      x.sha256 === expected && path.resolve(x.path) === path.resolve(candidate));
+      x.sha256 === expected && x.team === team && path.resolve(x.path) === path.resolve(candidate));
     if (matches.length !== 1) return 77;
   }
 
@@ -94,6 +95,14 @@ async function run() {
         return 3;
       }
       const login = loginRequired(page.url(), text);
+      if (!login && process.env.AIC_LEADERBOARD_TEAM_ID) {
+        const row = page.locator("tr").filter({hasText: process.env.AIC_LEADERBOARD_TEAM_ID});
+        await row.first().waitFor({timeout: 30000}).catch(() => {});
+        if (await row.count() !== 1) {
+          print({ok: false, reason: "team-row-unavailable", url: page.url()});
+          return 3;
+        }
+      }
       print({ok: !login, reason: login ? "login" : "ready", url: page.url(), text: text.slice(0, 1000)});
       return login ? 2 : 0;
     }
@@ -134,20 +143,32 @@ async function run() {
         print({ok: false, reason: initialText.trim() ? "login" : "empty-page", url: page.url()});
         return 3;
       }
+      const row = page.locator("tr").filter({hasText: process.env.AIC_LEADERBOARD_TEAM_ID});
+      await row.first().waitFor({timeout: 30000}).catch(() => {});
+      if (await row.count() !== 1) { print({ok: false, reason: "TEAM_ROW_NOT_UNIQUE"}); return 3; }
       let input = page.locator('input[type="file"][accept*=".zip"]').first();
       if (!(await input.count())) {
-        const button = page.getByText("提交作品", {exact: true}).last();
-        if (await button.count()) await button.click({timeout: 5000});
+        const button = row.first().getByText("提交作品", {exact: true});
+        if (await button.count() === 1) await button.click({timeout: 5000});
         input = page.locator('input[type="file"][accept*=".zip"]').first();
+        await input.waitFor({timeout: 10000}).catch(() => {});
       }
       if (!(await input.count())) { print({ok: false, reason: "NO_FILE_INPUT"}); return 3; }
       await input.setInputFiles(candidate);
-      const fileName = path.basename(candidate);
-      await page.getByText(fileName, {exact: false}).first().waitFor({timeout: 90000}).catch(() => {});
-      const uploadText = await body(page);
-      if (!uploadText.includes(fileName)) { print({ok: false, reason: "UPLOAD_NOT_READY"}); return 4; }
-      const buttons = page.getByRole("button", {name: /^(提交|确定|确认)$/});
-      if (!(await buttons.count())) { print({ok: false, reason: "NO_SUBMIT_BUTTON"}); return 5; }
+      // The AIC upload service displays underscores as hyphens in the stored filename.
+      const displayName = path.basename(candidate).replaceAll("_", "-");
+      const uploadReady = await page.waitForFunction(name => {
+        const input = document.querySelector('input[type="file"][accept*=".zip"]');
+        const widget = input?.closest(".ant-upload");
+        const text = widget?.innerText || widget?.textContent || "";
+        const removable = !!widget?.querySelector('.anticon-close-circle,[aria-label="close-circle"],[data-icon="close-circle"]');
+        return text.includes(name) && removable;
+      }, displayName, {timeout: 90000}).then(() => true).catch(() => false);
+      if (!uploadReady) { print({ok: false, reason: "UPLOAD_NOT_READY", displayName}); return 4; }
+      const buttons = page.locator(".ant-modal:visible").getByRole("button", {name: /^\s*提\s*交\s*$/});
+      if (await buttons.count() !== 1 || !(await buttons.first().isEnabled())) {
+        print({ok: false, reason: "NO_SUBMIT_BUTTON"}); return 5;
+      }
       const attemptedAt = new Date().toISOString();
       const attemptDir = path.join(root, "submissions");
       fs.mkdirSync(attemptDir, {recursive: true});
@@ -155,7 +176,7 @@ async function run() {
         JSON.stringify({attemptedAt, sha256: process.env.AIC_LEADERBOARD_EXPECTED_SHA256,
           candidateId: process.env.AIC_LEADERBOARD_QUEUE_ID}) + "\n", {flag: "wx"});
       console.log(`SUBMIT_CLICK_ATTEMPTED_AT=${attemptedAt}`);
-      await buttons.last().click({timeout: 5000});
+      await buttons.first().click({timeout: 5000});
       const clickedAt = new Date().toISOString();
       console.log(`SUBMIT_CLICKED_AT=${clickedAt}`);
       let feedback = "";
